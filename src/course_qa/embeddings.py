@@ -92,3 +92,125 @@ def hash_model_directory(model_dir: Path) -> str:
     
     return digest.hexdigest()
     
+
+class LocalSentenceEmbedder:
+    """
+    Load one local model and use it for documents and questions.
+    """
+
+    def __init__(
+        self,
+        model_dir: Path,
+        batch_size: int = 32,
+        document_prefix: str = "",
+        query_prefix: str = "",
+    ) -> None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be a positive integer.")
+
+        model_dir = model_dir.resolve(strict=True)
+
+        if not model_dir.is_dir():
+            raise ValueError(f"Model directory does not exist: {model_dir}")
+
+        # Optional dependency: Importing other modules does not load this
+        from sentence_transformers import SentenceTransformer
+
+        self.model = SentenceTransformer(
+            str(model_dir),
+            local_files_only=True
+            trust_remote_code=False,
+            device="cpu"
+        )
+
+        self.dimension = int(
+            self.model.get_sentence_embedding_dimension()
+        )
+        self.batch_size = batch_size
+        self.document_prefix = document_prefix
+        self.query_prefix = query_prefix
+
+        identity = {
+            "adapter": "local-sentence-transformers-v1",
+            "model_files": hash_model_directory(model_dir),
+            "dimension": self.dimension,
+            "normalize_embeddings": True,
+            "document_prefix": self.document_prefix,
+            "query_prefix": self.query_prefix,
+            "sentence_transformers_version": version("sentence-transformers"),
+            "tranformers_version": version("transformers"),
+            "torch_version": version("torch"),
+        }
+
+        serialized = json.dumps(identity, sort_keys=True)
+        self.fingerprint = hashlib.sha256(
+            serialized.encode("utf-8")
+        ).hexdigest()
+
+    def count_tokens(self, text: str) -> int:
+        """
+        Count the number of tokens in a given text.
+        """
+        tokens = self.model.tokenizer(
+            text,
+            add_special_tokens=False,
+            truncation=False,
+        )
+
+        return len(tokens["input_ids"])
+
+    def _encode(
+        self,
+        texts: Sequence[str],
+        prefix: str = "",
+    ) -> list[list[float]]:
+        """
+        Encode a list of texts into embeddings, applying the specified prefix.
+        """
+        if not texts:
+            return []
+
+        prepared = []
+
+        for text in texts:
+            if not text.strip():
+                raise ValueError("Text cannot be empty.")
+
+            value = prefix + text
+
+            if self.count_tokens(value) > self.model.max_seq_length:
+                raise ValueError(
+                    f"Text exceeds the maximum token limit of {self.model.max_seq_length} tokens. "
+                    "Use smaller chunks or token-aware chunking"
+                )
+
+            prepared.append(value)
+
+        vectors = self.model.encode(
+            prepared,
+            batch_size=self.batch_size,
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+            prompt="",
+        ).tolist()
+
+        validate_vectors(
+            vectors,
+            expected_len=len(prepared),
+            dimension=self.dimension,
+        )
+
+        return vectors
+
+    def embed_documents(
+        self,
+        texts: Sequence[str],
+    ) -> list[list[float]]:
+        return self._encode(texts, prefix=self.document_prefix)
+
+    def embed_query(
+        self,
+        text: str,
+    ) -> list[float]:
+        return self._encode([text], prefix=self.query_prefix)[0]
