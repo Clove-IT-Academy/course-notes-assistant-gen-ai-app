@@ -251,18 +251,18 @@ class SnapShotStore:
 
         ids = result["ids"][0]
         documents = result["documents"][0]
-        metadatas = result["metadatas"][0]
+        metadata = result["metadata"][0]
         distances = result["distances"][0]
 
         passages = []
 
         for rank, values in enumerate(
-            zip(ids, documents, metadatas, distances, strict=True),
+            zip(ids, documents, metadata, distances, strict=True),
             start=1,
         ):
-            chunk_id, text, metadata, distance = values
+            chunk_id, text, metadatum, distance = values
 
-            if text is None or metadata is None or distance is None:
+            if text is None or metadatum is None or distance is None:
                 raise ValueError("Chroma returned an incomplete passage.")
 
             passages.append(
@@ -270,7 +270,7 @@ class SnapShotStore:
                     chunk=Chunk(
                         chunk_id=chunk_id,
                         text=text,
-                        metadata=metadata,
+                        metadatum=metadatum,
                     ),
                     distance=float(distance),
                     rank=rank,
