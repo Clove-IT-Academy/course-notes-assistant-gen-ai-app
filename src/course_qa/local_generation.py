@@ -1,5 +1,10 @@
 """Local Transformers adapter for explicitly provisioned Qwen2.5 weights."""
 
+import json
+import re
+from collections.abc import Callable
+from importlib import import_module
+from itertools import combinations
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -20,10 +25,17 @@ class _LocalLoader(Protocol):
 
 class _Tokenizer(Protocol):
     eos_token_id: int | None
+    all_special_ids: list[int]
+
+    def __len__(self) -> int: ...
 
     def encode(self, text: str, *, add_special_tokens: bool) -> list[int]: ...
 
     def decode(self, token_ids: list[int], *, skip_special_tokens: bool) -> str: ...
+
+    def batch_decode(
+        self, sequences: list[list[int]], *, skip_special_tokens: bool
+    ) -> list[str]: ...
 
     def apply_chat_template(
         self,
@@ -48,7 +60,89 @@ class _CausalModel(Protocol):
         pad_token_id: int,
         eos_token_id: int,
         use_cache: bool,
+        prefix_allowed_tokens_fn: Callable[[int, torch.Tensor], list[int]],
     ) -> torch.Tensor: ...
+
+
+def _evidence_labels(user_prompt: str) -> list[str]:
+    """Read only the application-prepared evidence JSON, not question citations."""
+    _, marker, payload = user_prompt.partition(
+        "Evidence (application-prepared JSON):\n"
+    )
+    if not marker:
+        raise GenerationError(
+            "Generation requires the application-prepared evidence block."
+        )
+    decoded: object = json.JSONDecoder().raw_decode(payload)[0]
+    if not isinstance(decoded, dict):
+        raise GenerationError("Evidence block must be an object.")
+    data = cast(dict[str, object], decoded)
+    entries = data.get("evidence")
+    if not isinstance(entries, list):
+        raise GenerationError("Evidence block must contain a passage list.")
+    labels: list[str] = []
+    for entry in cast(list[object], entries):
+        if not isinstance(entry, dict):
+            raise GenerationError("Evidence passage must be an object.")
+        label = cast(dict[str, object], entry).get("source_label")
+        if not isinstance(label, str) or re.fullmatch(r"S[1-9][0-9]*", label) is None:
+            raise GenerationError("Evidence contains an invalid source label.")
+        if label in labels:
+            raise GenerationError("Evidence contains duplicate source labels.")
+        labels.append(label)
+    if len(labels) > 4:
+        raise GenerationError(
+            "This teaching adapter supports at most four evidence passages."
+        )
+    return labels
+
+
+def _response_pattern(labels: list[str]) -> str:
+    """Allow plain single-paragraph answers with matching inline/list citations.
+
+    The model chooses answer versus abstention, the explanation and which source
+    subset to cite. Grammar forces syntax only, never factual support. Quotes,
+    backslashes, brackets and control characters are excluded from free text;
+    the grammar itself emits the final citation suffix and JSON punctuation.
+    """
+    body = r'[^"\\\[\]\x00-\x1f]+'
+    branches = [
+        re.escape('{"status": "insufficient_evidence", "answer": "')
+        + body
+        + re.escape('", "cited_labels": []}')
+    ]
+    for size in range(1, len(labels) + 1):
+        for selected in combinations(labels, size):
+            suffix = " " + " ".join(f"[{label}]" for label in selected) + "."
+            branches.append(
+                re.escape('{"status": "answered", "answer": "')
+                + body
+                + re.escape(suffix + '", "cited_labels": ' + json.dumps(selected) + "}")
+            )
+    return "(" + "|".join(branches) + ")"
+
+
+class _AllowedTokens(Protocol):
+    allowed_tokens: list[int]
+
+
+class _Enforcer(Protocol):
+    def get_allowed_tokens(self, token_sequence: list[int]) -> _AllowedTokens: ...
+
+
+class _FormatLibrary(Protocol):
+    def RegexParser(self, pattern: str) -> object: ...
+
+    def TokenEnforcer(self, data: object, parser: object) -> object: ...
+
+    def TokenEnforcerTokenizerData(
+        self,
+        tokens: list[tuple[int, str, bool]],
+        decoder: Callable[[list[int]], str],
+        eos_token_id: int,
+        use_bitmask: bool,
+        vocab_size: int,
+    ) -> object: ...
 
 
 class LocalQwenGenerator:
@@ -118,6 +212,55 @@ class LocalQwenGenerator:
             ),
         )
         self.model.eval()
+        self._tokenizer_data: object | None = None
+
+    def _format_filter(
+        self, labels: list[str]
+    ) -> Callable[[int, torch.Tensor], list[int]]:
+        formats = cast(_FormatLibrary, import_module("lmformatenforcer"))
+        # Use LM Format Enforcer's core API: its bundled Transformers helper
+        # imports a tokenizer location removed by Transformers 5.
+        if self._tokenizer_data is None:
+            tokenizer = self.tokenizer
+            zero = tokenizer.encode("0", add_special_tokens=False)[-1]
+            special_ids = set(tokenizer.all_special_ids)
+            tokens: list[tuple[int, str, bool]] = []
+            regular_ids = [i for i in range(len(tokenizer)) if i not in special_ids]
+            # Batch decoding avoids hundreds of thousands of Python/Rust calls.
+            after_zero_texts = tokenizer.batch_decode(
+                [[zero, i] for i in regular_ids], skip_special_tokens=False
+            )
+            alone_texts = tokenizer.batch_decode(
+                [[i] for i in regular_ids], skip_special_tokens=False
+            )
+            for token_id, prefixed, alone in zip(
+                regular_ids, after_zero_texts, alone_texts, strict=True
+            ):
+                after_zero = prefixed[1:]
+                tokens.append((token_id, after_zero, len(after_zero) > len(alone)))
+            self._tokenizer_data = formats.TokenEnforcerTokenizerData(
+                tokens,
+                lambda ids: tokenizer.decode(ids, skip_special_tokens=False).rstrip(
+                    "�"
+                ),
+                self.eos_token_id,
+                False,
+                len(tokenizer),
+            )
+        enforcer = cast(
+            _Enforcer,
+            formats.TokenEnforcer(
+                self._tokenizer_data, formats.RegexParser(_response_pattern(labels))
+            ),
+        )
+
+        def allowed_tokens(batch_id: int, sent: torch.Tensor) -> list[int]:
+            if batch_id != 0:
+                raise GenerationError("Only single-question generation is supported.")
+            ids = [int(token.item()) for token in sent]
+            return enforcer.get_allowed_tokens(ids).allowed_tokens
+
+        return allowed_tokens
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
@@ -147,6 +290,7 @@ class LocalQwenGenerator:
                 raise GenerationError(
                     "Prompt and output reservation exceed the generation context window."
                 )
+            token_filter = self._format_filter(_evidence_labels(user_prompt))
             input_ids = torch.tensor([ids], dtype=torch.long, device="cpu")
             with torch.inference_mode():
                 output = self.model.generate(
@@ -158,6 +302,7 @@ class LocalQwenGenerator:
                     pad_token_id=self.eos_token_id,
                     eos_token_id=self.eos_token_id,
                     use_cache=True,
+                    prefix_allowed_tokens_fn=token_filter,
                 )
             generated = [int(token.item()) for token in output[0, len(ids) :]]
             if not generated or generated[-1] != self.eos_token_id:

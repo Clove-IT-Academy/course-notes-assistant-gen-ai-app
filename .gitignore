@@ -6,3 +6,6 @@ build/
 dist/
 .pytest_cache/
 .coverage
+models/
+storage/
+.ruff_cache/
