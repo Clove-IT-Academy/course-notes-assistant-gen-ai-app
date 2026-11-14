@@ -1,4 +1,4 @@
-"""Terminal entry point for the ingestion and retrieval teaching increment."""
+"""Terminal entry point for indexing, retrieval inspection and cited answers."""
 
 import argparse
 import json
@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from course_qa.embeddings import LocalSentenceEmbedder
+from course_qa.generation import GenerationError
 from course_qa.ingestion import ingest
 from course_qa.retrieval import retrieve_passages
 from course_qa.settings import load_settings
@@ -27,7 +28,7 @@ def terminal_text(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Inspect and index approved course notes."
+        description="Index approved course notes and ask questions with citations."
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -38,13 +39,14 @@ def main(argv: list[str] | None = None) -> int:
         "--manifest", type=Path, default=PROJECT_ROOT / "configs/sources.yaml"
     )
 
-    for command in ("ingest", "retrieve"):
+    for command in ("ingest", "retrieve", "ask", "chat"):
         subparser = commands.add_parser(command)
         subparser.add_argument(
             "--settings", type=Path, default=PROJECT_ROOT / "configs/app.yaml"
         )
-        if command == "retrieve":
+        if command in ("retrieve", "ask"):
             subparser.add_argument("question")
+        if command in ("retrieve", "ask", "chat"):
             subparser.add_argument("--project")
 
     status = commands.add_parser(
@@ -85,6 +87,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         settings = load_settings(args.settings)
+        if args.command in ("retrieve", "ask", "chat"):
+            if args.command != "chat" and not args.question.strip():
+                raise ValueError("Enter a nonempty question.")
+            if args.project is not None and not args.project.strip():
+                raise ValueError("The project filter cannot be empty.")
+            if args.command in ("ask", "chat") and settings.generation is None:
+                raise ValueError(
+                    f"The {args.command} command requires a generation section "
+                    "in the settings file."
+                )
+            if not (settings.app.storage_dir / "active.json").is_file():
+                print("No active index. Run ingest first.", file=sys.stderr)
+                return 3
+
         embedder = LocalSentenceEmbedder(
             settings.model_dir,
             batch_size=settings.app.embedding_batch_size,
@@ -97,6 +113,75 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(terminal_text(json.dumps(result, indent=2)))
             return 0
+
+        if args.command in ("ask", "chat"):
+            # Load once per command, then reuse both models for independent questions.
+            from course_qa.local_generation import LocalQwenGenerator
+            from course_qa.qa import answer_question
+
+            generation = settings.generation
+            if generation is None:
+                raise ValueError("Generation settings are required for ask/chat.")
+            print("Loading local Qwen generation model (CPU)...", file=sys.stderr)
+            generator = LocalQwenGenerator(
+                generation.model_dir,
+                context_window_tokens=generation.context_window_tokens,
+                max_generation_seconds=generation.max_generation_seconds,
+            )
+
+            def answer_and_display(question: str) -> None:
+                result = answer_question(
+                    question,
+                    settings.app,
+                    embedder,
+                    generator,
+                    count_request_tokens=generator.count_request_tokens,
+                    project=args.project,
+                )
+                # The service returns only after response and citation validation.
+                print(terminal_text(f"Snapshot: {result.index_id}"))
+                print(f"Status: {result.status}")
+                print(terminal_text(result.answer))
+                if result.sources:
+                    print("\nSources (indexed version):")
+                    for source in result.sources:
+                        print(terminal_text(source.render()))
+
+            if args.command == "ask":
+                answer_and_display(args.question)
+                return 0
+
+            print("Independent questions; no conversation history is used or saved.")
+            print("Type /quit or /exit to leave. EOF also exits; Ctrl+C interrupts.")
+            while True:
+                try:
+                    question = input("\nQuestion> ").strip()
+                except EOFError:
+                    print("\nGoodbye.")
+                    return 0
+                if question.casefold() in ("/quit", "/exit"):
+                    print("Goodbye.")
+                    return 0
+                if not question:
+                    continue
+                # Reject question-level input errors here. Retrieval/configuration
+                # failures still propagate and end the loop instead of being hidden.
+                if (
+                    embedder.count_tokens(question) > settings.app.max_question_tokens
+                    or generator.count_tokens(question)
+                    > settings.app.max_question_tokens
+                    or embedder.count_tokens(settings.query_prefix + question)
+                    > embedder.max_tokens
+                ):
+                    print(
+                        "Question exceeds the configured or embedding-model token limit.",
+                        file=sys.stderr,
+                    )
+                    continue
+                try:
+                    answer_and_display(question)
+                except GenerationError as error:
+                    print(terminal_text(f"Generation error: {error}"), file=sys.stderr)
 
         index_id, passages = retrieve_passages(
             args.question, settings.app, embedder, project=args.project
@@ -118,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nInterrupted.", file=sys.stderr)
         return 130
+    except GenerationError as error:
+        print(terminal_text(f"Generation error: {error}"), file=sys.stderr)
+        return 5
     except (OSError, ValueError, TypeError, RuntimeError) as error:
         print(terminal_text(f"Error: {error}"), file=sys.stderr)
         return 2
