@@ -28,6 +28,7 @@ class RetrievalCase:
     question: str
     expected_status: str
     evidence: tuple[EvidenceRange, ...]
+    alternatives: tuple[tuple[EvidenceRange, ...], ...] = ()
 
 
 def _mapping(value: object) -> Mapping[str, object]:
@@ -35,6 +36,28 @@ def _mapping(value: object) -> Mapping[str, object]:
         raise TypeError("Evaluation records must be JSON objects.")
     # JSON object keys are always strings.
     return cast(Mapping[str, object], value)
+
+
+def _evidence_ranges(value: object) -> tuple[EvidenceRange, ...]:
+    if not isinstance(value, list):
+        raise TypeError("Evidence groups must be lists of source ranges.")
+    ranges: list[EvidenceRange] = []
+    for entry in cast(list[object], value):
+        span = _mapping(entry)
+        first = require_integer(span, "line_start", 1)
+        last = require_integer(span, "line_end", first)
+        ranges.append(EvidenceRange(require_string(span, "source_id"), first, last))
+    return tuple(ranges)
+
+
+def evidence_group_coverage(
+    case: RetrievalCase, passages: Sequence[RetrievedPassage]
+) -> list[list[bool]]:
+    """Each group is an AND of ranges; alternative groups are combined with OR."""
+    return [
+        [evidence_covered(span, passages) for span in group]
+        for group in (case.evidence, *case.alternatives)
+    ]
 
 
 def load_cases(path: Path, split: str = "development") -> list[RetrievalCase]:
@@ -63,22 +86,27 @@ def load_cases(path: Path, split: str = "development") -> list[RetrievalCase]:
             status = require_string(data, "expected_status")
             if status not in {"answered", "insufficient_evidence"}:
                 raise ValueError("Unknown expected status.")
-            entries = data.get("expected_evidence")
-            if not isinstance(entries, list):
-                raise TypeError("expected_evidence must be a list.")
-            evidence: list[EvidenceRange] = []
-            for entry in cast(list[object], entries):
-                span = _mapping(entry)
-                first = require_integer(span, "line_start", 1)
-                last = require_integer(span, "line_end", first)
-                evidence.append(
-                    EvidenceRange(require_string(span, "source_id"), first, last)
+            evidence = _evidence_ranges(data.get("expected_evidence"))
+            raw_alternatives = data.get("expected_evidence_alternatives", [])
+            if not isinstance(raw_alternatives, list):
+                raise TypeError(
+                    "expected_evidence_alternatives must be a list of groups."
                 )
+            alternatives = tuple(
+                _evidence_ranges(group)
+                for group in cast(list[object], raw_alternatives)
+            )
+            if any(not group for group in alternatives):
+                raise ValueError("Alternative evidence groups must not be empty.")
             if status == "answered" and not evidence:
                 raise ValueError("Answerable cases require expected evidence.")
             cases.append(
                 RetrievalCase(
-                    case_id, require_string(data, "question"), status, tuple(evidence)
+                    case_id,
+                    require_string(data, "question"),
+                    status,
+                    evidence,
+                    alternatives,
                 )
             )
         except (ValueError, TypeError) as error:
@@ -122,11 +150,12 @@ def evaluate_retrieval(
         index_id, passages = retrieve_passages(case.question, config, embedder)
         elapsed = time.perf_counter() - started
         index_ids.add(index_id)
-        coverage = [evidence_covered(span, passages) for span in case.evidence]
+        groups = evidence_group_coverage(case, passages)
+        coverage = groups[0]
         fully_covered: bool | None = None
         if case.expected_status == "answered":
             answerable += 1
-            fully_covered = all(coverage)
+            fully_covered = any(bool(group) and all(group) for group in groups)
             covered_cases += int(fully_covered)
         records.append(
             {
@@ -134,6 +163,10 @@ def evaluate_retrieval(
                 "index_id": index_id,
                 "expected_status": case.expected_status,
                 "expected_range_coverage": coverage,
+                "evidence_group_coverage": groups,
+                "matched_evidence_groups": [
+                    index for index, group in enumerate(groups) if group and all(group)
+                ],
                 "all_expected_ranges_covered": fully_covered,
                 "latency_seconds": round(elapsed, 4),
                 "retrieved": [
@@ -154,7 +187,7 @@ def evaluate_retrieval(
             "The active snapshot changed during evaluation; rerun on one snapshot."
         )
     return {
-        "metric": "full_expected_line_range_coverage_at_k",
+        "metric": "any_complete_evidence_group_coverage_at_k",
         "top_k": config.top_k,
         "embedding_fingerprint": embedder.fingerprint,
         "answerable_cases": answerable,
