@@ -6,6 +6,7 @@ from collections.abc import Callable
 from importlib import import_module
 from itertools import combinations
 from pathlib import Path
+from time import monotonic
 from typing import Protocol, cast
 
 import torch
@@ -265,6 +266,20 @@ class LocalQwenGenerator:
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def _format_request(self, system_prompt: str, user_prompt: str) -> str:
+        return self.tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+    def count_request_tokens(self, system_prompt: str, user_prompt: str) -> int:
+        """Count exactly the chat template used by generate, including role tokens."""
+        return self.count_tokens(self._format_request(system_prompt, user_prompt))
+
     def generate(
         self,
         *,
@@ -277,14 +292,7 @@ class LocalQwenGenerator:
         if max_output_tokens <= 0:
             raise ValueError("Output token limit must be positive.")
         try:
-            formatted = self.tokenizer.apply_chat_template(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+            formatted = self._format_request(system_prompt, user_prompt)
             ids = self.tokenizer.encode(formatted, add_special_tokens=False)
             if len(ids) + max_output_tokens > self.context_window_tokens:
                 raise GenerationError(
@@ -292,6 +300,7 @@ class LocalQwenGenerator:
                 )
             token_filter = self._format_filter(_evidence_labels(user_prompt))
             input_ids = torch.tensor([ids], dtype=torch.long, device="cpu")
+            started = monotonic()
             with torch.inference_mode():
                 output = self.model.generate(
                     input_ids=input_ids,
@@ -305,9 +314,18 @@ class LocalQwenGenerator:
                     prefix_allowed_tokens_fn=token_filter,
                 )
             generated = [int(token.item()) for token in output[0, len(ids) :]]
+            elapsed = monotonic() - started
             if not generated or generated[-1] != self.eos_token_id:
+                limits: list[str] = []
+                if len(generated) >= max_output_tokens:
+                    limits.append("output token limit reached")
+                if elapsed >= self.max_generation_seconds:
+                    limits.append("cooperative time limit reached")
+                reason = "; ".join(limits) or "model stopped without EOS"
                 raise GenerationError(
-                    "Generation ended before EOS; output may be incomplete."
+                    f"Generation incomplete: {reason}; produced {len(generated)}/"
+                    f"{max_output_tokens} output tokens in {elapsed:.1f}s "
+                    f"for {len(ids)} input tokens. No answer was accepted."
                 )
             raw = self.tokenizer.decode(generated, skip_special_tokens=True)
             return parse_generation_response(raw)
