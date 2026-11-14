@@ -2,7 +2,7 @@
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from importlib import import_module
 from itertools import combinations
 from pathlib import Path
@@ -131,6 +131,67 @@ class _Enforcer(Protocol):
     def get_allowed_tokens(self, token_sequence: list[int]) -> _AllowedTokens: ...
 
 
+class _RegexState(Protocol):
+    config: object
+
+    def add_character(self, character: str) -> "_RegexState": ...
+
+    def get_allowed_characters(self) -> str: ...
+
+    def can_end(self) -> bool: ...
+
+    def cache_key(self) -> Hashable | None: ...
+
+    def shortcut_key(self) -> Hashable | None: ...
+
+
+class _CachedRegexState:
+    """Adapt regex character strings to cached sets for LMFE's core traversal.
+
+    LMFE 0.11's TokenEnforcer intersects these iterables with tokenizer-tree
+    children. A set gives the same characters without scanning a large Unicode
+    string at every tree node. Cache entries belong to one request/grammar and
+    are shared by its immutable parser states; no vocabulary is restricted.
+    """
+
+    def __init__(
+        self,
+        parser: _RegexState,
+        cache: dict[Hashable, frozenset[str]] | None = None,
+    ) -> None:
+        self.parser = parser
+        self.cache = {} if cache is None else cache
+
+    @property
+    def config(self) -> object:
+        return self.parser.config
+
+    @config.setter
+    def config(self, value: object) -> None:
+        self.parser.config = value
+        self.cache.clear()
+
+    def add_character(self, character: str) -> "_CachedRegexState":
+        return _CachedRegexState(self.parser.add_character(character), self.cache)
+
+    def get_allowed_characters(self) -> frozenset[str]:
+        key = self.parser.cache_key()
+        if key is None:
+            return frozenset(self.parser.get_allowed_characters())
+        if key not in self.cache:
+            self.cache[key] = frozenset(self.parser.get_allowed_characters())
+        return self.cache[key]
+
+    def can_end(self) -> bool:
+        return self.parser.can_end()
+
+    def cache_key(self) -> Hashable | None:
+        return self.parser.cache_key()
+
+    def shortcut_key(self) -> Hashable | None:
+        return self.parser.shortcut_key()
+
+
 class _FormatLibrary(Protocol):
     def RegexParser(self, pattern: str) -> object: ...
 
@@ -251,7 +312,10 @@ class LocalQwenGenerator:
         enforcer = cast(
             _Enforcer,
             formats.TokenEnforcer(
-                self._tokenizer_data, formats.RegexParser(_response_pattern(labels))
+                self._tokenizer_data,
+                _CachedRegexState(
+                    cast(_RegexState, formats.RegexParser(_response_pattern(labels)))
+                ),
             ),
         )
 
