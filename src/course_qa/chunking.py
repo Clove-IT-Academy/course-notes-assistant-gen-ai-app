@@ -20,7 +20,7 @@ def chunk_text(
     if chunk_overlap < 0 or chunk_overlap >= chunk_size:
         raise ValueError("chunk_overlap must be between 0 and chunk_size - 1.")
 
-    chunks = []
+    chunks: list[str] = []
     start = 0
 
     while start < len(text):

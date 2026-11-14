@@ -1,15 +1,21 @@
 import hashlib
 import json
+from collections.abc import Iterator, Sequence
 from pathlib import Path
-from typing import Sequence
 
 from course_qa.chunking import chunk_text
 from course_qa.cleaning import clean_text
 from course_qa.config import AppConfig, SourceConfig
-from course_qa.contracts import Chunk
+from course_qa.contracts import (
+    Chunk,
+    ChunkMetadata,
+    IngestPreview,
+    IngestSnapshotResult,
+)
 from course_qa.embeddings import Embedder
 from course_qa.loaders import load_text_file
 from course_qa.store import SnapshotStore
+
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -18,7 +24,7 @@ def _hash_text(text: str) -> str:
 def _included_segments(
     normalized_text: str,
     excluded_lines: tuple[tuple[int, int], ...],
-):
+) -> Iterator[tuple[int, str]]:
     """
     Yield contigous included text with its original starting line.
     """
@@ -30,7 +36,7 @@ def _included_segments(
     cursor = 0
 
     for first, last in excluded_lines:
-        segment = "".join(lines[cursor:first - 1])
+        segment = "".join(lines[cursor : first - 1])
 
         if segment.strip():
             yield cursor + 1, segment
@@ -60,7 +66,7 @@ def prepare_chunks(
         raise ValueError("Each source_id must be unique.")
 
     resolved_sources: list[tuple[SourceConfig, Path]] = []
-    seen_paths = set()
+    seen_paths: set[Path] = set()
     total_bytes = 0
 
     # Validate the whole selection before reading document text.
@@ -82,7 +88,7 @@ def prepare_chunks(
     if total_bytes > config.max_total_file_bytes:
         raise ValueError("Selected files exceed the total-size limit.")
 
-    chunks = []
+    chunks: list[Chunk] = []
     total_characters = 0
     step = config.chunk_size - config.chunk_overlap
 
@@ -96,9 +102,7 @@ def prepare_chunks(
             raise ValueError("The corpus exceeds the character limit.")
 
         source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        relative_path = path.relative_to(
-            source.approved_root.resolve()
-        ).as_posix()
+        relative_path = path.relative_to(source.approved_root.resolve()).as_posix()
 
         source_chunk_count = 0
 
@@ -110,9 +114,7 @@ def prepare_chunks(
 
             # clean_text removes outer newline characters.
             removed_prefix = len(segment) - len(segment.lstrip("\n"))
-            first_cleaned_line = (
-                first_line + segment[:removed_prefix].count("\n")
-            )
+            first_cleaned_line = first_line + segment[:removed_prefix].count("\n")
 
             pieces = chunk_text(
                 cleaned,
@@ -127,18 +129,14 @@ def prepare_chunks(
                 start = position * step
                 end = start + len(piece)
 
-                line_start = (
-                    first_cleaned_line + cleaned[:start].count("\n")
-                )
-                line_end = (
-                    first_cleaned_line + cleaned[:end].count("\n")
-                )
+                line_start = first_cleaned_line + cleaned[:start].count("\n")
+                line_end = first_cleaned_line + cleaned[:end].count("\n")
 
                 # A trailing newline does not include the following line.
                 if piece.endswith("\n"):
                     line_end -= 1
 
-                metadata = {
+                metadata: ChunkMetadata = {
                     "source_id": source.source_id,
                     "title": source.title,
                     "project": source.project,
@@ -172,9 +170,7 @@ def prepare_chunks(
                 source_chunk_count += 1
 
         if source_chunk_count == 0:
-            raise ValueError(
-                f"No usable text remains in source: {source.source_id}"
-            )
+            raise ValueError(f"No usable text remains in source: {source.source_id}")
 
     return chunks
 
@@ -184,7 +180,7 @@ def ingest(
     config: AppConfig,
     embedder: Embedder | None = None,
     dry_run: bool = False,
-) -> dict:
+) -> IngestPreview | IngestSnapshotResult:
     """Prepare, embed, and publish a complete knowledge-base snapshot."""
     chunks = prepare_chunks(sources, config)
 
@@ -199,16 +195,14 @@ def ingest(
     if embedder is None:
         raise ValueError("An explicit embedding adapter is required.")
 
-    build_identity = {
+    build_identity: dict[str, str | int | list[str]] = {
         "processing_version": "text-character-chunks-v1",
         "embedding_fingerprint": embedder.fingerprint,
         "dimension": embedder.dimension,
         "chunk_ids": sorted(chunk.chunk_id for chunk in chunks),
     }
 
-    build_key = _hash_text(
-        json.dumps(build_identity, sort_keys=True)
-    )
+    build_key = _hash_text(json.dumps(build_identity, sort_keys=True))
 
     store = SnapshotStore(config.storage_dir)
 
@@ -220,24 +214,20 @@ def ingest(
             store.open_active(embedder.fingerprint, embedder.dimension)
 
             return {
-                "status": "unchanged",
                 **active,
+                "status": "unchanged",
             }
 
-        vectors = []
+        vectors: list[list[float]] = []
 
         for start in range(
             0,
             len(chunks),
             config.embedding_batch_size,
         ):
-            batch = chunks[start:start + config.embedding_batch_size]
+            batch = chunks[start : start + config.embedding_batch_size]
 
-            vectors.extend(
-                embedder.embed_documents(
-                    [chunk.text for chunk in batch]
-                )
-            )
+            vectors.extend(embedder.embed_documents([chunk.text for chunk in batch]))
 
         manifest = store.create_snapshot(
             chunks=chunks,

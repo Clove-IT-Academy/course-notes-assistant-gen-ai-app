@@ -1,9 +1,27 @@
-import math
 import hashlib
 import json
+import math
+from collections.abc import Sequence
 from importlib.metadata import version
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Literal, Protocol, cast
+
+import numpy as np
+from numpy.typing import NDArray
+
+
+class _TextEncoder(Protocol):
+    def encode(
+        self,
+        inputs: list[str],
+        *,
+        batch_size: int,
+        normalize_embeddings: bool,
+        convert_to_numpy: Literal[True],
+        show_progress_bar: bool,
+        prompt: str,
+    ) -> NDArray[np.float32]: ...
+
 
 class Embedder(Protocol):
     """
@@ -17,19 +35,25 @@ class Embedder(Protocol):
         """
         Count the number of tokens in a given text.
         """
-        raise NotImplementedError("count_tokens method must be implemented by subclasses.")
+        raise NotImplementedError(
+            "count_tokens method must be implemented by subclasses."
+        )
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
-       """
+        """
         Embed a list of documents and return their vector representations.
         """
-        raise NotImplementedError("embed_documents method must be implemented by subclasses.")
+        raise NotImplementedError(
+            "embed_documents method must be implemented by subclasses."
+        )
 
     def embed_query(self, text: str) -> list[float]:
         """
         Embed a single query and return its vector representation.
         """
-        raise NotImplementedError("embed_query method must be implemented by subclasses.")
+        raise NotImplementedError(
+            "embed_query method must be implemented by subclasses."
+        )
 
 
 def validate_vectors(
@@ -89,9 +113,9 @@ def hash_model_directory(model_dir: Path) -> str:
 
         # Update the main digest with the file's hash and a null byte to separate entries
         digest.update(file_digest.digest())
-    
+
     return digest.hexdigest()
-    
+
 
 class LocalSentenceEmbedder:
     """
@@ -117,20 +141,23 @@ class LocalSentenceEmbedder:
         from sentence_transformers import SentenceTransformer
 
         self.model = SentenceTransformer(
-            str(model_dir),
-            local_files_only=True
-            trust_remote_code=False,
-            device="cpu"
+            str(model_dir), local_files_only=True, trust_remote_code=False, device="cpu"
         )
 
-        self.dimension = int(
-            self.model.get_sentence_embedding_dimension()
-        )
+        dimension = self.model.get_embedding_dimension()
+        if dimension is None or dimension <= 0:
+            raise ValueError("Model must declare a positive embedding dimension.")
+        self.dimension = dimension
+
+        max_tokens = self.model.max_seq_length
+        if max_tokens is None or max_tokens <= 0:
+            raise ValueError("Model must declare a positive token limit.")
+        self.max_tokens = max_tokens
         self.batch_size = batch_size
         self.document_prefix = document_prefix
         self.query_prefix = query_prefix
 
-        identity = {
+        identity: dict[str, str | int | bool] = {
             "adapter": "local-sentence-transformers-v1",
             "model_files": hash_model_directory(model_dir),
             "dimension": self.dimension,
@@ -138,14 +165,12 @@ class LocalSentenceEmbedder:
             "document_prefix": self.document_prefix,
             "query_prefix": self.query_prefix,
             "sentence_transformers_version": version("sentence-transformers"),
-            "tranformers_version": version("transformers"),
+            "transformers_version": version("transformers"),
             "torch_version": version("torch"),
         }
 
         serialized = json.dumps(identity, sort_keys=True)
-        self.fingerprint = hashlib.sha256(
-            serialized.encode("utf-8")
-        ).hexdigest()
+        self.fingerprint = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     def count_tokens(self, text: str) -> int:
         """
@@ -153,7 +178,7 @@ class LocalSentenceEmbedder:
         """
         tokens = self.model.tokenizer(
             text,
-            add_special_tokens=False,
+            add_special_tokens=True,
             truncation=False,
         )
 
@@ -170,7 +195,7 @@ class LocalSentenceEmbedder:
         if not texts:
             return []
 
-        prepared = []
+        prepared: list[str] = []
 
         for text in texts:
             if not text.strip():
@@ -178,15 +203,18 @@ class LocalSentenceEmbedder:
 
             value = prefix + text
 
-            if self.count_tokens(value) > self.model.max_seq_length:
+            if self.count_tokens(value) > self.max_tokens:
                 raise ValueError(
-                    f"Text exceeds the maximum token limit of {self.model.max_seq_length} tokens. "
+                    f"Text exceeds the maximum token limit of {self.max_tokens} tokens. "
                     "Use smaller chunks or token-aware chunking"
                 )
 
             prepared.append(value)
 
-        vectors = self.model.encode(
+        # Sentence Transformers has multimodal overloads with unknown input types.
+        # Narrow this boundary to the documented text-to-NumPy call we use.
+        encoder = cast(_TextEncoder, self.model)
+        vectors: list[list[float]] = encoder.encode(
             prepared,
             batch_size=self.batch_size,
             normalize_embeddings=True,
@@ -197,7 +225,7 @@ class LocalSentenceEmbedder:
 
         validate_vectors(
             vectors,
-            expected_len=len(prepared),
+            expected_count=len(prepared),
             dimension=self.dimension,
         )
 

@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+
 @dataclass(frozen=True)
 class SourceConfig:
     source_id: str
@@ -53,7 +54,7 @@ class SourceConfig:
                 )
 
             previous_end = end
-        
+
         return path
 
 
@@ -62,6 +63,7 @@ class AppConfig:
     """
     Represents the configuration for the course notes QA assistant application.
     """
+
     storage_dir: Path
 
     chunk_size: int = 1000
@@ -99,11 +101,7 @@ class AppConfig:
             raise ValueError("Size, count, and token limits must be positive.")
 
         if not 0 <= self.chunk_overlap < self.chunk_size:
-            raise ValueError(
-                "chunk_overlap must be between 0 and chunk_size - 1."
-            )
+            raise ValueError("chunk_overlap must be between 0 and chunk_size - 1.")
 
         if self.max_context_passages > self.top_k:
-            raise ValueError(
-                "max_context_passages cannot exceed top_k."
-            )
+            raise ValueError("max_context_passages cannot exceed top_k.")

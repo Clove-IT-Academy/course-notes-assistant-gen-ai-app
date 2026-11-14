@@ -28,9 +28,10 @@ def retrieve_passages(
         if not project:
             raise ValueError("The project filter cannot be empty.")
 
-    if max_distance is not None:
-        if not math.isfinite(max_distance) or max_distance < 0:
-            raise ValueError("max_distance must be finite and nonnegative.")
+    if max_distance is not None and (
+        not math.isfinite(max_distance) or max_distance < 0
+    ):
+        raise ValueError("max_distance must be finite and nonnegative.")
 
     store = SnapshotStore(config.storage_dir)
 
@@ -60,10 +61,6 @@ def retrieve_passages(
             raise ValueError("Retrieval returned a non-finite distance.")
 
     if max_distance is not None:
-        passages = [
-            passage
-            for passage in passages
-            if passage.distance <= max_distance
-        ]
+        passages = [passage for passage in passages if passage.distance <= max_distance]
 
     return manifest["index_id"], passages
