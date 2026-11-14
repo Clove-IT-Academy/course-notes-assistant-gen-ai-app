@@ -3,6 +3,7 @@ import json
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
+from course_qa.chunking import chunk_spans
 from course_qa.cleaning import clean_text
 from course_qa.config import AppConfig, SourceConfig
 from course_qa.contracts import (
@@ -53,27 +54,15 @@ def _bounded_pieces(
     config: AppConfig,
     embedder: LocalSentenceEmbedder | None,
 ) -> Iterator[tuple[int, str]]:
-    """Preserve character offsets while fitting the model's actual token limit."""
-    start = 0
-    while start < len(text):
-        end = min(start + config.chunk_size, len(text))
-        if embedder is not None:
-            while (
-                embedder.count_tokens(embedder.document_prefix + text[start:end])
-                > embedder.max_tokens
-            ):
-                if end - start <= 1:
-                    raise ValueError(
-                        "Embedding prefix and one character exceed the model token limit."
-                    )
-                # Halving guarantees progress without assuming token counts are monotonic.
-                end = start + max(1, (end - start) // 2)
-        yield start, text[start:end]
-        if end == len(text):
-            break
-        # Keep overlap smaller than the shortened chunk so start always advances.
-        overlap = min(config.chunk_overlap, (end - start) // 2)
-        start = end - overlap
+    """Use the shared boundary-aware chunker, with model limits when available."""
+    yield from chunk_spans(
+        text,
+        chunk_size=config.chunk_size,
+        chunk_overlap=config.chunk_overlap,
+        count_tokens=embedder.count_tokens if embedder is not None else None,
+        max_tokens=embedder.max_tokens if embedder is not None else None,
+        prefix=embedder.document_prefix if embedder is not None else "",
+    )
 
 
 def prepare_chunks(
@@ -167,7 +156,7 @@ def prepare_chunks(
                     "line_start": line_start,
                     "line_end": line_end,
                     "chunk_index": source_chunk_count,
-                    "processing_version": "text-token-checked-chunks-v2",
+                    "processing_version": "text-boundary-token-chunks-v3",
                 }
 
                 identity = json.dumps(
@@ -217,7 +206,7 @@ def ingest(
         raise ValueError("An explicit embedding adapter is required.")
 
     build_identity: dict[str, str | int | list[str]] = {
-        "processing_version": "text-token-checked-chunks-v2",
+        "processing_version": "text-boundary-token-chunks-v3",
         "embedding_fingerprint": embedder.fingerprint,
         "dimension": embedder.dimension,
         "chunk_ids": sorted(chunk.chunk_id for chunk in chunks),
