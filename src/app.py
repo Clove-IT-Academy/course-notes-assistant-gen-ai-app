@@ -1,4 +1,4 @@
-"""Terminal entry point for indexing, retrieval inspection and cited answers."""
+"""Terminal entry point for indexing, cited answers and evaluation reports."""
 
 import argparse
 import json
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> int:
         "--manifest", type=Path, default=PROJECT_ROOT / "configs/sources.yaml"
     )
 
-    for command in ("ingest", "retrieve", "ask", "chat"):
+    for command in ("ingest", "retrieve", "ask", "chat", "evaluate"):
         subparser = commands.add_parser(command)
         subparser.add_argument(
             "--settings", type=Path, default=PROJECT_ROOT / "configs/app.yaml"
@@ -48,6 +48,19 @@ def main(argv: list[str] | None = None) -> int:
             subparser.add_argument("question")
         if command in ("retrieve", "ask", "chat"):
             subparser.add_argument("--project")
+        if command == "evaluate":
+            subparser.add_argument(
+                "--cases", type=Path, default=PROJECT_ROOT / "eval/cases.jsonl"
+            )
+            subparser.add_argument(
+                "--split", choices=("development", "held_out"), default="development"
+            )
+            subparser.add_argument(
+                "--mode", choices=("retrieval", "answers"), default="retrieval"
+            )
+            subparser.add_argument(
+                "--output", type=Path, help="Save a new JSON report; never overwrite."
+            )
 
     status = commands.add_parser(
         "status", help="Read active snapshot metadata without a model."
@@ -87,6 +100,66 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         settings = load_settings(args.settings)
+        if args.command == "evaluate":
+            from course_qa.evaluation import (
+                evaluate_answers,
+                evaluate_retrieval,
+                load_cases,
+            )
+
+            # Validate fixtures/output before loading either model. Held-out runs
+            # require explicit --split selection; development remains the default.
+            cases = load_cases(args.cases, args.split)
+            if args.output is not None:
+                if args.output.exists() or args.output.is_symlink():
+                    raise ValueError("Output already exists; choose a new report path.")
+                if not args.output.parent.is_dir():
+                    raise ValueError("The report output directory must already exist.")
+            if args.mode == "answers" and settings.generation is None:
+                raise ValueError("Answer evaluation requires generation settings.")
+            if not (settings.app.storage_dir / "active.json").is_file():
+                print("No active index. Run ingest first.", file=sys.stderr)
+                return 3
+            evaluation_embedder = LocalSentenceEmbedder(
+                settings.model_dir,
+                batch_size=settings.app.embedding_batch_size,
+                document_prefix=settings.document_prefix,
+                query_prefix=settings.query_prefix,
+            )
+            if args.mode == "answers":
+                from course_qa.local_generation import LocalQwenGenerator
+
+                generation = settings.generation
+                if generation is None:
+                    raise ValueError("Answer evaluation requires generation settings.")
+                print("Loading local Qwen generation model (CPU)...", file=sys.stderr)
+                evaluation_generator = LocalQwenGenerator(
+                    generation.model_dir,
+                    context_window_tokens=generation.context_window_tokens,
+                    max_generation_seconds=generation.max_generation_seconds,
+                )
+                report = evaluate_answers(
+                    cases,
+                    settings.app,
+                    evaluation_embedder,
+                    evaluation_generator,
+                    count_request_tokens=evaluation_generator.count_request_tokens,
+                )
+            else:
+                report = evaluate_retrieval(cases, settings.app, evaluation_embedder)
+            report["split"] = args.split
+            report["mode"] = args.mode
+            rendered = json.dumps(report, indent=2, ensure_ascii=True)
+            if args.output is None:
+                print(rendered)
+            else:
+                # Exclusive creation also prevents overwriting after a path race.
+                with args.output.open("x", encoding="utf-8") as output:
+                    output.write(rendered + "\n")
+                print(terminal_text(f"Report saved: {args.output.resolve()}"))
+            # Completion is not a release-gate pass; answer review stays pending.
+            return 0
+
         if args.command in ("retrieve", "ask", "chat"):
             if args.command != "chat" and not args.question.strip():
                 raise ValueError("Enter a nonempty question.")
