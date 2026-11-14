@@ -16,3 +16,13 @@ source_manifest: sources.yaml
 # Required prefixes must match the model's document/query conventions exactly.
 document_prefix: ""
 query_prefix: ""
+
+# Local Qwen2.5-1.5B-Instruct weights saved by setup_generation_model.py.
+# This is separate from the Sentence Transformer used for embeddings.
+generation:
+  model_dir: ../models/generation
+  # Total prompt (including chat formatting) plus reserved output must fit.
+  context_window_tokens: 4096
+  max_output_tokens: 384
+  # Cooperative decoding limit; not a hard deadline or model-loading timeout.
+  max_generation_seconds: 120
