@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "index_id": "b3cdf22af40c477aa674ac5dbf0859e1",
+  "status": "ready",
+  "build_key": "6ffd62ab721c330031270dec3b8d418bd57750016660d67b4cba24b178589812",
+  "embedding_fingerprint": "6f427e87f2bd1280b894538b3ceef2d17d2a9fc875debd000c6e5fca743be5a7",
+  "dimension": 384,
+  "distance_metric": "cosine",
+  "chunk_count": 61
+}

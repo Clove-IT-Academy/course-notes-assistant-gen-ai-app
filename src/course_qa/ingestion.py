@@ -3,7 +3,6 @@ import json
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from course_qa.chunking import chunk_text
 from course_qa.cleaning import clean_text
 from course_qa.config import AppConfig, SourceConfig
 from course_qa.contracts import (
@@ -12,7 +11,7 @@ from course_qa.contracts import (
     IngestPreview,
     IngestSnapshotResult,
 )
-from course_qa.embeddings import Embedder
+from course_qa.embeddings import Embedder, LocalSentenceEmbedder
 from course_qa.loaders import load_text_file
 from course_qa.store import SnapshotStore
 
@@ -49,9 +48,38 @@ def _included_segments(
         yield cursor + 1, remaining
 
 
+def _bounded_pieces(
+    text: str,
+    config: AppConfig,
+    embedder: LocalSentenceEmbedder | None,
+) -> Iterator[tuple[int, str]]:
+    """Preserve character offsets while fitting the model's actual token limit."""
+    start = 0
+    while start < len(text):
+        end = min(start + config.chunk_size, len(text))
+        if embedder is not None:
+            while (
+                embedder.count_tokens(embedder.document_prefix + text[start:end])
+                > embedder.max_tokens
+            ):
+                if end - start <= 1:
+                    raise ValueError(
+                        "Embedding prefix and one character exceed the model token limit."
+                    )
+                # Halving guarantees progress without assuming token counts are monotonic.
+                end = start + max(1, (end - start) // 2)
+        yield start, text[start:end]
+        if end == len(text):
+            break
+        # Keep overlap smaller than the shortened chunk so start always advances.
+        overlap = min(config.chunk_overlap, (end - start) // 2)
+        start = end - overlap
+
+
 def prepare_chunks(
     sources: Sequence[SourceConfig],
     config: AppConfig,
+    embedder: LocalSentenceEmbedder | None = None,
 ) -> list[Chunk]:
     """Validate approved text sources and create traceable chunks."""
     if not sources:
@@ -90,7 +118,6 @@ def prepare_chunks(
 
     chunks: list[Chunk] = []
     total_characters = 0
-    step = config.chunk_size - config.chunk_overlap
 
     for source, path in resolved_sources:
         raw_text = load_text_file(str(path))
@@ -116,17 +143,10 @@ def prepare_chunks(
             removed_prefix = len(segment) - len(segment.lstrip("\n"))
             first_cleaned_line = first_line + segment[:removed_prefix].count("\n")
 
-            pieces = chunk_text(
-                cleaned,
-                chunk_size=config.chunk_size,
-                chunk_overlap=config.chunk_overlap,
-            )
-
-            for position, piece in enumerate(pieces):
+            for start, piece in _bounded_pieces(cleaned, config, embedder):
                 if not piece.strip():
                     continue
 
-                start = position * step
                 end = start + len(piece)
 
                 line_start = first_cleaned_line + cleaned[:start].count("\n")
@@ -147,7 +167,7 @@ def prepare_chunks(
                     "line_start": line_start,
                     "line_end": line_end,
                     "chunk_index": source_chunk_count,
-                    "processing_version": "text-character-chunks-v1",
+                    "processing_version": "text-token-checked-chunks-v2",
                 }
 
                 identity = json.dumps(
@@ -182,7 +202,8 @@ def ingest(
     dry_run: bool = False,
 ) -> IngestPreview | IngestSnapshotResult:
     """Prepare, embed, and publish a complete knowledge-base snapshot."""
-    chunks = prepare_chunks(sources, config)
+    local_embedder = embedder if isinstance(embedder, LocalSentenceEmbedder) else None
+    chunks = prepare_chunks(sources, config, local_embedder)
 
     if dry_run:
         return {
@@ -196,7 +217,7 @@ def ingest(
         raise ValueError("An explicit embedding adapter is required.")
 
     build_identity: dict[str, str | int | list[str]] = {
-        "processing_version": "text-character-chunks-v1",
+        "processing_version": "text-token-checked-chunks-v2",
         "embedding_fingerprint": embedder.fingerprint,
         "dimension": embedder.dimension,
         "chunk_ids": sorted(chunk.chunk_id for chunk in chunks),

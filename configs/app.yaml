@@ -1,0 +1,18 @@
+# All relative paths resolve from this file's directory (configs/).
+schema_version: 1
+
+# Expected location for your previously selected Sentence Transformer model.
+# Place the complete saved model here, or replace this with its existing path.
+# This setting does not choose or download a model.
+model_dir: ../models/embeddings
+
+# Chroma snapshots and the active-index pointer are stored here on ingestion.
+storage_dir: ../storage
+
+# Explicit allowlist of course notes; no recursive folder scanning.
+source_manifest: sources.yaml
+
+# Keep these empty unless your chosen embedding model requires prefixes.
+# Required prefixes must match the model's document/query conventions exactly.
+document_prefix: ""
+query_prefix: ""

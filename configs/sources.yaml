@@ -1,0 +1,13 @@
+# Paths resolve relative to this manifest, not the terminal's working directory.
+# Start with one course document; add other approved notes after checking retrieval.
+schema_version: 1
+
+sources:
+  - source_id: webcam-student-notes
+    title: From Webcam Filters to Object Detection
+    project: webcam-filter-app
+    document_type: student_notes
+    path: ../../webcam-filter-app/STUDENT_NOTES.md
+    approved_root: ../../webcam-filter-app
+    # Inclusive, one-based original line ranges to omit during preparation.
+    excluded_lines: []
