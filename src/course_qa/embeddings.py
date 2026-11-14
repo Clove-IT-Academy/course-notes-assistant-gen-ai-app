@@ -180,6 +180,9 @@ class LocalSentenceEmbedder:
             text,
             add_special_tokens=True,
             truncation=False,
+            # Counting may inspect oversized candidates before ingestion splits
+            # them. _encode still rejects oversized inputs before inference.
+            verbose=False,
         )
 
         return len(tokens["input_ids"])
