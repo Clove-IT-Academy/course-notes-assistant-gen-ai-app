@@ -16,7 +16,15 @@ from course_qa.embeddings import Embedder, LocalSentenceEmbedder
 from course_qa.loaders import load_text_file
 from course_qa.store import SnapshotStore
 
+BOUNDARY_PROCESSING_VERSION = "text-boundary-token-chunks-v3"
 PROCESSING_VERSION = f"text-and-{CHUNKING_VERSION}"
+
+
+def _processing_version(config: AppConfig) -> str:
+    """Keep baseline identities stable and isolate experimental processing."""
+    if config.chunking_strategy == "boundary":
+        return BOUNDARY_PROCESSING_VERSION
+    return PROCESSING_VERSION
 
 
 def _hash_text(text: str) -> str:
@@ -58,8 +66,12 @@ def _bounded_pieces(
     *,
     markdown: bool = False,
 ) -> Iterator[tuple[int, str]]:
-    """Respect Markdown structure only for Markdown; bound both formats by tokens."""
-    split = markdown_chunk_spans if markdown else chunk_spans
+    """Use the selected strategy; structural parsing applies only to Markdown."""
+    split = (
+        markdown_chunk_spans
+        if markdown and config.chunking_strategy == "markdown_blocks"
+        else chunk_spans
+    )
     yield from split(
         text,
         chunk_size=config.chunk_size,
@@ -111,6 +123,7 @@ def prepare_chunks(
         raise ValueError("Selected files exceed the total-size limit.")
 
     chunks: list[Chunk] = []
+    processing_version = _processing_version(config)
     total_characters = 0
 
     for source, path in resolved_sources:
@@ -163,7 +176,7 @@ def prepare_chunks(
                     "line_start": line_start,
                     "line_end": line_end,
                     "chunk_index": source_chunk_count,
-                    "processing_version": PROCESSING_VERSION,
+                    "processing_version": processing_version,
                 }
 
                 identity = json.dumps(
@@ -213,7 +226,7 @@ def ingest(
         raise ValueError("An explicit embedding adapter is required.")
 
     build_identity: dict[str, str | int | list[str]] = {
-        "processing_version": PROCESSING_VERSION,
+        "processing_version": _processing_version(config),
         "embedding_fingerprint": embedder.fingerprint,
         "dimension": embedder.dimension,
         "chunk_ids": sorted(chunk.chunk_id for chunk in chunks),
