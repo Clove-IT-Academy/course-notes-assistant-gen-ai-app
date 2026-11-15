@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -82,7 +83,16 @@ class AppConfig:
     max_context_tokens: int = 4000
     max_output_tokens: int = 800
 
+    # Keep the previously evaluated splitter as the default. Structural Markdown
+    # chunking remains an explicit experiment, not a proven quality improvement.
+    chunking_strategy: Literal["boundary", "markdown_blocks"] = "boundary"
+
     def __post_init__(self) -> None:
+        if self.chunking_strategy not in ("boundary", "markdown_blocks"):
+            raise ValueError(
+                "chunking_strategy must be 'boundary' or 'markdown_blocks'."
+            )
+
         positive_values = (
             self.chunk_size,
             self.embedding_batch_size,
