@@ -3,7 +3,7 @@ import json
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 
-from course_qa.chunking import chunk_spans
+from course_qa.chunking import CHUNKING_VERSION, chunk_spans, markdown_chunk_spans
 from course_qa.cleaning import clean_text
 from course_qa.config import AppConfig, SourceConfig
 from course_qa.contracts import (
@@ -15,6 +15,8 @@ from course_qa.contracts import (
 from course_qa.embeddings import Embedder, LocalSentenceEmbedder
 from course_qa.loaders import load_text_file
 from course_qa.store import SnapshotStore
+
+PROCESSING_VERSION = f"text-and-{CHUNKING_VERSION}"
 
 
 def _hash_text(text: str) -> str:
@@ -53,9 +55,12 @@ def _bounded_pieces(
     text: str,
     config: AppConfig,
     embedder: LocalSentenceEmbedder | None,
+    *,
+    markdown: bool = False,
 ) -> Iterator[tuple[int, str]]:
-    """Use the shared boundary-aware chunker, with model limits when available."""
-    yield from chunk_spans(
+    """Respect Markdown structure only for Markdown; bound both formats by tokens."""
+    split = markdown_chunk_spans if markdown else chunk_spans
+    yield from split(
         text,
         chunk_size=config.chunk_size,
         chunk_overlap=config.chunk_overlap,
@@ -132,7 +137,9 @@ def prepare_chunks(
             removed_prefix = len(segment) - len(segment.lstrip("\n"))
             first_cleaned_line = first_line + segment[:removed_prefix].count("\n")
 
-            for start, piece in _bounded_pieces(cleaned, config, embedder):
+            for start, piece in _bounded_pieces(
+                cleaned, config, embedder, markdown=path.suffix.lower() == ".md"
+            ):
                 if not piece.strip():
                     continue
 
@@ -156,7 +163,7 @@ def prepare_chunks(
                     "line_start": line_start,
                     "line_end": line_end,
                     "chunk_index": source_chunk_count,
-                    "processing_version": "text-boundary-token-chunks-v3",
+                    "processing_version": PROCESSING_VERSION,
                 }
 
                 identity = json.dumps(
@@ -206,7 +213,7 @@ def ingest(
         raise ValueError("An explicit embedding adapter is required.")
 
     build_identity: dict[str, str | int | list[str]] = {
-        "processing_version": "text-boundary-token-chunks-v3",
+        "processing_version": PROCESSING_VERSION,
         "embedding_fingerprint": embedder.fingerprint,
         "dimension": embedder.dimension,
         "chunk_ids": sorted(chunk.chunk_id for chunk in chunks),
