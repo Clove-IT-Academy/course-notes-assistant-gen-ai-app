@@ -16,6 +16,7 @@ import pytest
 import app
 from course_qa.citations import SourceReference
 from course_qa.config import AppConfig
+from course_qa.excerpts import VerifiedExcerpt
 from course_qa.generation import GenerationError
 from course_qa.qa import AnswerResult
 from course_qa.settings import GenerationSettings, RuntimeSettings
@@ -318,4 +319,29 @@ def test_invalid_split_is_rejected_by_argument_parser(cli: CliHarness) -> None:
         app.main(["evaluate", "--split", "everything"])
     assert raised.value.code == 2
     cli.load_settings.assert_not_called()
+    cli.embedder.assert_not_called()
+
+
+def test_verified_excerpts_are_displayed_as_source_text(
+    cli: CliHarness, capsys: pytest.CaptureFixture[str]
+) -> None:
+    source = cli.answer.return_value.sources[0]
+    cli.answer.return_value = replace(
+        cli.answer.return_value,
+        status="evidence_selected",
+        answer="Selected source excerpts; no generated explanation is shown.",
+        answer_mode="verified_excerpts",
+        excerpts=(VerifiedExcerpt("Source text\x1b[31m", source),),
+    )
+    assert app.main(["ask", "Question", "--answer-mode", "verified_excerpts"]) == 0
+    output = capsys.readouterr().out
+    assert "Status: evidence_selected" in output and "Source text" in output
+    assert "\x1b" not in output and "The sample switch is green" not in output
+    assert cli.answer.call_args.kwargs["answer_mode"] == "verified_excerpts"
+
+
+def test_retrieval_evaluation_does_not_silently_ignore_excerpt_mode(
+    cli: CliHarness,
+) -> None:
+    assert app.main(["evaluate", "--answer-mode", "verified_excerpts"]) == 2
     cli.embedder.assert_not_called()

@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 from course_qa.config import AppConfig
 from course_qa.contracts import RetrievedPassage, require_integer, require_string
@@ -220,6 +220,7 @@ def evaluate_answers(
     generator: Generator,
     *,
     count_request_tokens: Callable[[str, str], int],
+    answer_mode: Literal["generated", "verified_excerpts"] = "generated",
 ) -> dict[str, object]:
     """Run independent questions and retain validated answers for human review.
 
@@ -229,6 +230,8 @@ def evaluate_answers(
     """
     if not cases:
         raise ValueError("Answer evaluation requires at least one case.")
+    if answer_mode not in ("generated", "verified_excerpts"):
+        raise ValueError("Unknown answer mode.")
     if len({case.case_id for case in cases}) != len(cases):
         raise ValueError("Evaluation case IDs must be unique.")
     store = SnapshotStore(config.storage_dir)
@@ -253,7 +256,14 @@ def evaluate_answers(
             "expected_status": case.expected_status,
             "expected_claims": list(case.expected_claims),
             "human_review": "pending",
+            "answer_mode": answer_mode,
         }
+        expected_output_status = (
+            "evidence_selected"
+            if answer_mode == "verified_excerpts" and case.expected_status == "answered"
+            else case.expected_status
+        )
+        record["expected_output_status"] = expected_output_status
         abstention_cases += int(case.expected_status == "insufficient_evidence")
         try:
             result = answer_question(
@@ -262,12 +272,13 @@ def evaluate_answers(
                 embedder,
                 generator,
                 count_request_tokens=count_request_tokens,
+                answer_mode=answer_mode,
             )
             if result.index_id != index_id:
                 raise RuntimeError(
                     "The active snapshot changed during answer evaluation."
                 )
-            matched = result.status == case.expected_status
+            matched = result.status == expected_output_status
             matches += int(matched)
             correct_abstentions += int(
                 matched and case.expected_status == "insufficient_evidence"
@@ -281,6 +292,8 @@ def evaluate_answers(
                 prompt_version=result.prompt_version,
                 generation_model_id=result.generation_model_id,
                 generation_called=result.generation_called,
+                excerpts=[asdict(excerpt) for excerpt in result.excerpts],
+                excerpt_integrity="passed" if result.excerpts else "not_applicable",
             )
         except GenerationError as error:
             errors += 1
@@ -295,7 +308,12 @@ def evaluate_answers(
     if active_index() != index_id:
         raise RuntimeError("The active snapshot changed during answer evaluation.")
     return {
-        "metric": "expected_response_status_agreement",
+        "metric": (
+            "expected_evidence_selection_status_agreement"
+            if answer_mode == "verified_excerpts"
+            else "expected_response_status_agreement"
+        ),
+        "answer_mode": answer_mode,
         "index_id": index_id,
         "embedding_fingerprint": embedder.fingerprint,
         "generation_model_id": generator.model_id,
@@ -313,7 +331,8 @@ def evaluate_answers(
         "limitations": "Status agreement and valid citations do not establish factual "
         "support, expected-claim coverage or injection resistance. Human review is "
         "required; no answer-accuracy or release-pass claim is made. Model/provider "
-        "token usage is not measured. Source ranges require the reviewed version.",
+        "token usage is not measured. Source ranges require the reviewed version. "
+        "Verified excerpts establish copying integrity, not relevance or completeness.",
         "cases": records,
     }
 
@@ -325,12 +344,17 @@ def main() -> int:
     parser.add_argument("--settings", type=Path, default=root / "configs/app.yaml")
     parser.add_argument("--mode", choices=("retrieval", "answers"), default="retrieval")
     parser.add_argument(
+        "--answer-mode", choices=("generated", "verified_excerpts"), default="generated"
+    )
+    parser.add_argument(
         "--output", type=Path, help="Write a new report; never overwrite."
     )
     parser.add_argument(
         "--split", choices=("development", "held_out"), default="development"
     )
     args = parser.parse_args()
+    if args.mode == "retrieval" and args.answer_mode != "generated":
+        parser.error("--answer-mode applies only to --mode answers.")
     if args.output is not None and args.output.exists():
         parser.error("Output already exists; choose a new report path.")
     cases = load_cases(args.cases, args.split)
@@ -360,6 +384,7 @@ def main() -> int:
             embedder,
             generator,
             count_request_tokens=generator.count_request_tokens,
+            answer_mode=args.answer_mode,
         )
     else:
         report = evaluate_retrieval(cases, settings.app, embedder)

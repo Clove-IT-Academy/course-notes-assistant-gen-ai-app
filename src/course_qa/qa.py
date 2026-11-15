@@ -9,6 +9,7 @@ from course_qa.config import AppConfig
 from course_qa.context import build_context
 from course_qa.contracts import ContextBundle
 from course_qa.embeddings import Embedder
+from course_qa.excerpts import VerifiedExcerpt, verified_source_excerpts
 from course_qa.generation import GenerationError, Generator
 from course_qa.prompts import PROMPT_VERSION, build_prompt
 from course_qa.retrieval import retrieve_passages
@@ -16,13 +17,15 @@ from course_qa.retrieval import retrieve_passages
 
 @dataclass(frozen=True)
 class AnswerResult:
-    status: Literal["answered", "insufficient_evidence"]
+    status: Literal["answered", "insufficient_evidence", "evidence_selected"]
     answer: str
     sources: tuple[SourceReference, ...]
     index_id: str
     prompt_version: str
     generation_model_id: str
     generation_called: bool
+    answer_mode: Literal["generated", "verified_excerpts"] = "generated"
+    excerpts: tuple[VerifiedExcerpt, ...] = ()
 
 
 def answer_question(
@@ -34,6 +37,7 @@ def answer_question(
     count_request_tokens: Callable[[str, str], int],
     project: str | None = None,
     max_distance: float | None = None,
+    answer_mode: Literal["generated", "verified_excerpts"] = "generated",
 ) -> AnswerResult:
     """Retrieve, budget, generate and validate; propagate operational failures.
 
@@ -43,7 +47,11 @@ def answer_question(
     because counting two raw strings is not equivalent to counting chat tokens.
     There is no automatic generation retry, provider switch or answer repair.
     Citation validation checks traceability, not factual entailment.
+    verified_excerpts discards generated explanations and returns hash-checked
+    context passages as evidence_selected. It does not verify their relevance.
     """
+    if answer_mode not in ("generated", "verified_excerpts"):
+        raise ValueError("Unknown answer mode.")
     question = question.strip()
     if not question:
         raise ValueError("Enter a nonempty question.")
@@ -63,6 +71,7 @@ def answer_question(
             prompt_version=PROMPT_VERSION,
             generation_model_id=generator.model_id,
             generation_called=False,
+            answer_mode=answer_mode,
         )
 
     if not passages:
@@ -110,12 +119,32 @@ def answer_question(
         max_output_tokens=config.max_output_tokens,
     )
     references = validate_citations(generated, context)
+    if answer_mode == "verified_excerpts" and generated.status == "answered":
+        # Keep all bounded context passages so a model's citation selection
+        # cannot silently omit a supplied definition. Generated prose is discarded.
+        excerpts = verified_source_excerpts(context)
+        return AnswerResult(
+            status="evidence_selected",
+            answer="Selected source excerpts; no generated explanation is shown.",
+            sources=tuple(excerpt.reference for excerpt in excerpts),
+            index_id=index_id,
+            prompt_version=prompt.version,
+            generation_model_id=generator.model_id,
+            generation_called=True,
+            answer_mode=answer_mode,
+            excerpts=excerpts,
+        )
     return AnswerResult(
         status=generated.status,
-        answer=generated.answer,
+        answer=(
+            "The model did not identify sufficient evidence in the supplied notes."
+            if answer_mode == "verified_excerpts"
+            else generated.answer
+        ),
         sources=references,
         index_id=index_id,
         prompt_version=prompt.version,
         generation_model_id=generator.model_id,
         generation_called=True,
+        answer_mode=answer_mode,
     )

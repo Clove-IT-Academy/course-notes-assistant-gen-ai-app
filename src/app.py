@@ -48,6 +48,13 @@ def main(argv: list[str] | None = None) -> int:
             subparser.add_argument("question")
         if command in ("retrieve", "ask", "chat"):
             subparser.add_argument("--project")
+        if command in ("ask", "chat", "evaluate"):
+            subparser.add_argument(
+                "--answer-mode",
+                choices=("generated", "verified_excerpts"),
+                default="generated",
+                help="Generated prose or verified indexed excerpts.",
+            )
         if command == "evaluate":
             subparser.add_argument(
                 "--cases", type=Path, default=PROJECT_ROOT / "eval/cases.jsonl"
@@ -110,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
             # Validate fixtures/output before loading either model. Held-out runs
             # require explicit --split selection; development remains the default.
             cases = load_cases(args.cases, args.split)
+            if args.mode == "retrieval" and args.answer_mode != "generated":
+                raise ValueError("--answer-mode applies only to --mode answers.")
             if args.output is not None:
                 if args.output.exists() or args.output.is_symlink():
                     raise ValueError("Output already exists; choose a new report path.")
@@ -144,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
                     evaluation_embedder,
                     evaluation_generator,
                     count_request_tokens=evaluation_generator.count_request_tokens,
+                    answer_mode=args.answer_mode,
                 )
             else:
                 report = evaluate_retrieval(cases, settings.app, evaluation_embedder)
@@ -210,12 +220,17 @@ def main(argv: list[str] | None = None) -> int:
                     generator,
                     count_request_tokens=generator.count_request_tokens,
                     project=args.project,
+                    answer_mode=args.answer_mode,
                 )
                 # The service returns only after response and citation validation.
                 print(terminal_text(f"Snapshot: {result.index_id}"))
                 print(f"Status: {result.status}")
                 print(terminal_text(result.answer))
-                if result.sources:
+                if result.excerpts:
+                    for excerpt in result.excerpts:
+                        print(terminal_text(f"\n{excerpt.reference.render()}"))
+                        print(terminal_text(excerpt.text))
+                elif result.sources:
                     print("\nSources (indexed version):")
                     for source in result.sources:
                         print(terminal_text(source.render()))
