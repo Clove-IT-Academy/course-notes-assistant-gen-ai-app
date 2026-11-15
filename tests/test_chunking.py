@@ -167,7 +167,9 @@ def test_ingestion_routes_markdown_and_preserves_exclusion_line_mapping(
         "student_notes",
         excluded_lines=((4, 4),),
     )
-    config = AppConfig(storage_dir=tmp_path / "storage")
+    config = AppConfig(
+        storage_dir=tmp_path / "storage", chunking_strategy="markdown_blocks"
+    )
     chunks = prepare_chunks([source], config)
     assert [(c.metadata["line_start"], c.metadata["line_end"]) for c in chunks] == [
         (1, 3),
@@ -191,7 +193,10 @@ def test_plain_text_does_not_treat_hash_lines_as_markdown_sections(
     path = tmp_path / "notes.txt"
     path.write_text(text, encoding="utf-8")
     source = SourceConfig("notes", "Notes", "course", path, tmp_path, "student_notes")
-    config = AppConfig(storage_dir=tmp_path / "storage")
+    # Exercise format routing within the explicitly selected structural strategy.
+    config = AppConfig(
+        storage_dir=tmp_path / "storage", chunking_strategy="markdown_blocks"
+    )
     chunks = prepare_chunks([source], config)
     assert len(chunks) == 1 and chunks[0].text == text
     markdown = tmp_path / "notes.md"
