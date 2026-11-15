@@ -12,6 +12,11 @@ storage_dir: ../storage
 # Explicit allowlist of course notes; no recursive folder scanning.
 source_manifest: sources.yaml
 
+# Keep the evaluated 58-chunk processing strategy. markdown_blocks is an
+# opt-in experiment whose current generation results regressed; changing this
+# setting changes processing identities and may rebuild/publish a new snapshot.
+chunking_strategy: boundary
+
 # Keep these empty unless your chosen embedding model requires prefixes.
 # Required prefixes must match the model's document/query conventions exactly.
 document_prefix: ""
