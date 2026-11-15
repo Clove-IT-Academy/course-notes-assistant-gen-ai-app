@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools==84.2.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "course-notes-qa-assistant"
+version = "0.1.0"
+description = "Local course-note retrieval, verified source excerpts and bounded generation"
+readme = "README.md"
+requires-python = ">=3.12,<3.15"
+dependencies = [
+  "numpy==2.5.4", "PyYAML==6.0.3", "pypdf==6.21.4",
+  "chromadb==1.5.9", "sentence-transformers==6.2.0",
+  "transformers==5.22.1", "torch==2.15.0",
+  "huggingface-hub==2.4.0", "lm-format-enforcer==0.11.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "ruff==0.17.3", "build==1.6.1"]
+
+[project.scripts]
+course-notes-qa = "app:main"
+course-notes-qa-setup-embeddings = "setup_model:main"
+course-notes-qa-setup-generation = "setup_generation_model:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["app", "setup_model", "setup_generation_model"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

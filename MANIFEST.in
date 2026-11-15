@@ -1,0 +1,4 @@
+include README.md requirements.lock pyrightconfig.json
+recursive-include configs *.yaml
+include eval/cases.jsonl
+recursive-include tests *.py

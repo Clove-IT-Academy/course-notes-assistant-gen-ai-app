@@ -62,15 +62,19 @@ def verified_source_excerpts(context: ContextBundle) -> tuple[VerifiedExcerpt, .
                 "Source excerpt failed its indexed content hash."
             )
         fields = supplied[label]
-        if fields.get("text") != chunk.text or any(
-            fields.get(key) != metadata[key]
-            for key in (
-                "project",
-                "title",
-                "document_type",
-                "source_path",
-                "line_start",
-                "line_end",
+        if (
+            fields.get("page_number") != metadata.get("page_number")
+            or fields.get("text") != chunk.text
+            or any(
+                fields.get(key) != metadata[key]
+                for key in (
+                    "project",
+                    "title",
+                    "document_type",
+                    "source_path",
+                    "line_start",
+                    "line_end",
+                )
             )
         ):
             raise InvalidGenerationError(
@@ -89,6 +93,7 @@ def verified_source_excerpts(context: ContextBundle) -> tuple[VerifiedExcerpt, .
                     line_start=metadata["line_start"],
                     line_end=metadata["line_end"],
                     source_hash=metadata["source_hash"],
+                    page_number=metadata.get("page_number"),
                 ),
             )
         )

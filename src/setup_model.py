@@ -8,10 +8,11 @@ from tempfile import TemporaryDirectory
 from sentence_transformers import SentenceTransformer
 
 from course_qa.embeddings import LocalSentenceEmbedder
+from course_qa.paths import project_root
 
 MODEL_ID = "sentence-transformers/all-MiniLM-L6-v2"
 MODEL_REVISION = "8b3219a92973c328a8e22fadcfa821b5dc75636a"
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = project_root()
 
 
 def setup_model(destination: Path) -> None:

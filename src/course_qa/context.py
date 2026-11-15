@@ -20,6 +20,7 @@ def _substantially_overlaps(
     if (
         left["source_id"] != right["source_id"]
         or left["source_hash"] != right["source_hash"]
+        or left.get("page_number") != right.get("page_number")
     ):
         return False
 
@@ -102,6 +103,8 @@ def build_context(
             "line_end": metadata["line_end"],
             "text": chunk.text,
         }
+        if "page_number" in metadata:
+            payload["page_number"] = metadata["page_number"]
 
         block = json.dumps(payload, ensure_ascii=False)
         candidate_blocks = [*blocks, block]

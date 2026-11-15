@@ -13,6 +13,7 @@ class SourceConfig:
     document_type: str
 
     excluded_lines: tuple[tuple[int, int], ...] = ()
+    excluded_pages: tuple[int, ...] = ()
 
     def resolve_path(self) -> Path:
         """
@@ -31,8 +32,16 @@ class SourceConfig:
         if not path.is_file():
             raise ValueError("Source path must point to a file.")
 
-        if path.suffix.lower() not in {".md", ".txt"}:
-            raise ValueError("This increment supports only Markdown and text.")
+        if path.suffix.lower() not in {".md", ".txt", ".pdf"}:
+            raise ValueError("Supported sources are Markdown, text and text PDFs.")
+        if path.suffix.lower() == ".pdf" and self.excluded_lines:
+            raise ValueError("PDF exclusions use excluded_pages, not excluded_lines.")
+        if path.suffix.lower() != ".pdf" and self.excluded_pages:
+            raise ValueError("excluded_pages applies only to PDFs.")
+        if any(type(page) is not int or page < 1 for page in self.excluded_pages):
+            raise ValueError("Excluded pages must be positive integers.")
+        if tuple(sorted(set(self.excluded_pages))) != self.excluded_pages:
+            raise ValueError("Excluded pages must be sorted and unique.")
 
         if not all(
             value.strip()
@@ -86,8 +95,12 @@ class AppConfig:
     # Keep the previously evaluated splitter as the default. Structural Markdown
     # chunking remains an explicit experiment, not a proven quality improvement.
     chunking_strategy: Literal["boundary", "markdown_blocks"] = "boundary"
+    answer_mode: Literal["generated", "verified_excerpts"] = "generated"
+    max_pdf_pages: int = 200
 
     def __post_init__(self) -> None:
+        if self.answer_mode not in ("generated", "verified_excerpts"):
+            raise ValueError("Unknown answer_mode.")
         if self.chunking_strategy not in ("boundary", "markdown_blocks"):
             raise ValueError(
                 "chunking_strategy must be 'boundary' or 'markdown_blocks'."
@@ -105,6 +118,7 @@ class AppConfig:
             self.max_question_tokens,
             self.max_context_tokens,
             self.max_output_tokens,
+            self.max_pdf_pages,
         )
 
         if any(value <= 0 for value in positive_values):

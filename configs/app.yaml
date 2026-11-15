@@ -17,6 +17,10 @@ source_manifest: sources.yaml
 # setting changes processing identities and may rebuild/publish a new snapshot.
 chunking_strategy: boundary
 
+# Classroom default: show hash-verified indexed evidence, not rewritten prose.
+# Use generated explicitly only to compare the known synthesis limitations.
+answer_mode: verified_excerpts
+
 # Keep these empty unless your chosen embedding model requires prefixes.
 # Required prefixes must match the model's document/query conventions exactly.
 document_prefix: ""

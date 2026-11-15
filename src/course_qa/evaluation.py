@@ -12,6 +12,7 @@ from course_qa.config import AppConfig
 from course_qa.contracts import RetrievedPassage, require_integer, require_string
 from course_qa.embeddings import Embedder, LocalSentenceEmbedder
 from course_qa.generation import GenerationError, Generator
+from course_qa.paths import project_root
 from course_qa.qa import answer_question
 from course_qa.retrieval import retrieve_passages
 from course_qa.settings import load_settings
@@ -23,6 +24,7 @@ class EvidenceRange:
     source_id: str
     line_start: int
     line_end: int
+    page_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,12 @@ def _evidence_ranges(value: object) -> tuple[EvidenceRange, ...]:
         span = _mapping(entry)
         first = require_integer(span, "line_start", 1)
         last = require_integer(span, "line_end", first)
-        ranges.append(EvidenceRange(require_string(span, "source_id"), first, last))
+        page = (
+            require_integer(span, "page_number", 1) if "page_number" in span else None
+        )
+        ranges.append(
+            EvidenceRange(require_string(span, "source_id"), first, last, page)
+        )
     return tuple(ranges)
 
 
@@ -139,6 +146,7 @@ def evidence_covered(
         (passage.chunk.metadata["line_start"], passage.chunk.metadata["line_end"])
         for passage in passages
         if passage.chunk.metadata["source_id"] == expected.source_id
+        and passage.chunk.metadata.get("page_number") == expected.page_number
     )
     next_line = expected.line_start
     for first, last in intervals:
@@ -190,6 +198,7 @@ def evaluate_retrieval(
                         "source_id": passage.chunk.metadata["source_id"],
                         "line_start": passage.chunk.metadata["line_start"],
                         "line_end": passage.chunk.metadata["line_end"],
+                        "page_number": passage.chunk.metadata.get("page_number"),
                     }
                     for passage in passages
                 ],
@@ -338,7 +347,7 @@ def evaluate_answers(
 
 
 def main() -> int:
-    root = Path(__file__).resolve().parents[2]
+    root = project_root()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=root / "eval/cases.jsonl")
     parser.add_argument("--settings", type=Path, default=root / "configs/app.yaml")

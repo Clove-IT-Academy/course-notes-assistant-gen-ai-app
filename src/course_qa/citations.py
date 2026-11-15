@@ -30,15 +30,21 @@ class SourceReference:
     line_start: int
     line_end: int
     source_hash: str
+    page_number: int | None = None
 
     def render(self) -> str:
         """Describe the indexed source; do not claim the live file is unchanged.
 
         Terminal callers must escape control characters before printing this.
         """
+        locator = (
+            f"page {self.page_number}, extracted lines {self.line_start}-{self.line_end}"
+            if self.page_number is not None
+            else f"lines {self.line_start}-{self.line_end}"
+        )
         return (
             f"[{self.label}] {self.project} / {self.source_path} / "
-            f"lines {self.line_start}-{self.line_end} — {self.title}"
+            f"{locator} — {self.title}"
         )
 
 
@@ -105,6 +111,7 @@ def validate_citations(
                 line_start=metadata["line_start"],
                 line_end=metadata["line_end"],
                 source_hash=metadata["source_hash"],
+                page_number=metadata.get("page_number"),
             )
         )
     return tuple(references)

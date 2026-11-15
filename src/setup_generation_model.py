@@ -11,10 +11,11 @@ import huggingface_hub
 from course_qa.citations import validate_citations
 from course_qa.contracts import Chunk, ChunkMetadata, ContextBundle
 from course_qa.local_generation import MODEL_ID, LocalQwenGenerator
+from course_qa.paths import project_root
 from course_qa.prompts import build_prompt
 
 MODEL_REVISION = "fb163acb387a011a0cd205b259aa1b253299a05d"
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = project_root()
 
 
 class _SnapshotHub(Protocol):

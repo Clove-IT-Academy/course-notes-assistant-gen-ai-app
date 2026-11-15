@@ -13,7 +13,8 @@ from course_qa.contracts import (
     IngestSnapshotResult,
 )
 from course_qa.embeddings import Embedder, LocalSentenceEmbedder
-from course_qa.loaders import load_text_file
+from course_qa.errors import SourceReadError
+from course_qa.loaders import load_pdf_pages
 from course_qa.store import SnapshotStore
 
 BOUNDARY_PROCESSING_VERSION = "text-boundary-token-chunks-v3"
@@ -127,76 +128,95 @@ def prepare_chunks(
     total_characters = 0
 
     for source, path in resolved_sources:
-        raw_text = load_text_file(str(path))
-        normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            data = path.read_bytes()
+            if len(data) > config.max_file_bytes:
+                raise SourceReadError("A selected source exceeds the file-size limit.")
+            source_hash = hashlib.sha256(data).hexdigest()
+            relative_path = path.relative_to(source.approved_root.resolve()).as_posix()
+            source_chunk_count = 0
+            units: list[tuple[int | None, str]]
+            if path.suffix.lower() == ".pdf":
+                pages = load_pdf_pages(
+                    path,
+                    max_pages=config.max_pdf_pages,
+                    max_characters=config.max_corpus_characters - total_characters,
+                    excluded_pages=source.excluded_pages,
+                    data=data,
+                )
+                units = [(page.page_number, page.text) for page in pages]
+            else:
+                units = [(None, data.decode("utf-8"))]
+        except (OSError, UnicodeError) as error:
+            raise SourceReadError(f"Cannot read source: {source.source_id}") from error
 
-        total_characters += len(normalized)
-
-        if total_characters > config.max_corpus_characters:
-            raise ValueError("The corpus exceeds the character limit.")
-
-        source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        relative_path = path.relative_to(source.approved_root.resolve()).as_posix()
-
-        source_chunk_count = 0
-
-        for first_line, segment in _included_segments(
-            normalized,
-            source.excluded_lines,
-        ):
-            cleaned = clean_text(segment)
-
-            # clean_text removes outer newline characters.
-            removed_prefix = len(segment) - len(segment.lstrip("\n"))
-            first_cleaned_line = first_line + segment[:removed_prefix].count("\n")
-
-            for start, piece in _bounded_pieces(
-                cleaned, config, embedder, markdown=path.suffix.lower() == ".md"
+        for page_number, raw_text in units:
+            normalized = raw_text.replace("\r\n", "\n").replace("\r", "\n")
+            total_characters += len(normalized)
+            if total_characters > config.max_corpus_characters:
+                raise SourceReadError("The corpus exceeds the character limit.")
+            for first_line, segment in _included_segments(
+                normalized,
+                source.excluded_lines if page_number is None else (),
             ):
-                if not piece.strip():
-                    continue
+                cleaned = clean_text(segment)
 
-                end = start + len(piece)
+                # clean_text removes outer newline characters.
+                removed_prefix = len(segment) - len(segment.lstrip("\n"))
+                first_cleaned_line = first_line + segment[:removed_prefix].count("\n")
 
-                line_start = first_cleaned_line + cleaned[:start].count("\n")
-                line_end = first_cleaned_line + cleaned[:end].count("\n")
+                for start, piece in _bounded_pieces(
+                    cleaned, config, embedder, markdown=path.suffix.lower() == ".md"
+                ):
+                    if not piece.strip():
+                        continue
 
-                # A trailing newline does not include the following line.
-                if piece.endswith("\n"):
-                    line_end -= 1
+                    end = start + len(piece)
 
-                metadata: ChunkMetadata = {
-                    "source_id": source.source_id,
-                    "title": source.title,
-                    "project": source.project,
-                    "document_type": source.document_type,
-                    "source_path": relative_path,
-                    "source_hash": source_hash,
-                    "content_hash": _hash_text(piece),
-                    "line_start": line_start,
-                    "line_end": line_end,
-                    "chunk_index": source_chunk_count,
-                    "processing_version": processing_version,
-                }
+                    line_start = first_cleaned_line + cleaned[:start].count("\n")
+                    line_end = first_cleaned_line + cleaned[:end].count("\n")
 
-                identity = json.dumps(
-                    {
-                        "metadata": metadata,
-                        "chunk_size": config.chunk_size,
-                        "chunk_overlap": config.chunk_overlap,
-                    },
-                    sort_keys=True,
-                )
+                    # A trailing newline does not include the following line.
+                    if piece.endswith("\n"):
+                        line_end -= 1
 
-                chunks.append(
-                    Chunk(
-                        chunk_id=_hash_text(identity),
-                        text=piece,
-                        metadata=metadata,
+                    metadata: ChunkMetadata = {
+                        "source_id": source.source_id,
+                        "title": source.title,
+                        "project": source.project,
+                        "document_type": source.document_type,
+                        "source_path": relative_path,
+                        "source_hash": source_hash,
+                        "content_hash": _hash_text(piece),
+                        "line_start": line_start,
+                        "line_end": line_end,
+                        "chunk_index": source_chunk_count,
+                        "processing_version": processing_version
+                        if page_number is None
+                        else f"pdf-pages-v1:{processing_version}",
+                    }
+
+                    if page_number is not None:
+                        metadata["page_number"] = page_number
+
+                    identity = json.dumps(
+                        {
+                            "metadata": metadata,
+                            "chunk_size": config.chunk_size,
+                            "chunk_overlap": config.chunk_overlap,
+                        },
+                        sort_keys=True,
                     )
-                )
 
-                source_chunk_count += 1
+                    chunks.append(
+                        Chunk(
+                            chunk_id=_hash_text(identity),
+                            text=piece,
+                            metadata=metadata,
+                        )
+                    )
+
+                    source_chunk_count += 1
 
         if source_chunk_count == 0:
             raise ValueError(f"No usable text remains in source: {source.source_id}")

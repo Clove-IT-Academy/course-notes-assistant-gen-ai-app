@@ -2,7 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 
 class ChunkMetadata(TypedDict):
@@ -17,6 +17,7 @@ class ChunkMetadata(TypedDict):
     line_end: int
     chunk_index: int
     processing_version: str
+    page_number: NotRequired[int]
 
 
 class SnapshotDetails(TypedDict):
@@ -109,4 +110,6 @@ def parse_chunk_metadata(data: Mapping[str, object]) -> ChunkMetadata:
     }
     if result["line_end"] < result["line_start"]:
         raise ValueError("A chunk's ending line precedes its starting line.")
+    if "page_number" in data:
+        result["page_number"] = require_integer(data, "page_number", 1)
     return result

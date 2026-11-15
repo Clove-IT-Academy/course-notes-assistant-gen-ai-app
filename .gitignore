@@ -9,4 +9,5 @@ dist/
 models/
 storage/
 .ruff_cache/
-eval/
+eval/reports/
+tmp/

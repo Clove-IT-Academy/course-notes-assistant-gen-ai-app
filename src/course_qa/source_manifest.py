@@ -90,8 +90,19 @@ def load_source_manifest(manifest_path: Path) -> list[SourceConfig]:
     for index, entry in enumerate(cast(list[object], entries), start=1):
         location = f"sources[{index}]"
         data = _object(entry, location)
-        if not required.issubset(data) or set(data) - required - {"excluded_lines"}:
+        if not required.issubset(data) or set(data) - required - {
+            "excluded_lines",
+            "excluded_pages",
+        }:
             raise ValueError(f"{location} has missing or unrecognized fields.")
+        pages = data.get("excluded_pages", [])
+        if not isinstance(pages, list):
+            raise TypeError(f"{location}.excluded_pages must be a list.")
+        page_numbers: list[int] = []
+        for page in cast(list[object], pages):
+            if type(page) is not int:
+                raise ValueError("Excluded page numbers must be integers.")
+            page_numbers.append(page)
 
         source = SourceConfig(
             source_id=_text(data, "source_id", location),
@@ -103,6 +114,7 @@ def load_source_manifest(manifest_path: Path) -> list[SourceConfig]:
             excluded_lines=_excluded_lines(
                 data.get("excluded_lines", []), f"{location}.excluded_lines"
             ),
+            excluded_pages=tuple(page_numbers),
         )
         resolved_path = source.resolve_path()
         if source.source_id in seen_ids:

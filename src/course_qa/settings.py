@@ -48,7 +48,13 @@ def load_settings(settings_path: Path) -> RuntimeSettings:
     data = cast(Mapping[str, object], values)
 
     required = {"schema_version", "model_dir", "storage_dir", "source_manifest"}
-    optional = {"document_prefix", "query_prefix", "generation", "chunking_strategy"}
+    optional = {
+        "document_prefix",
+        "query_prefix",
+        "generation",
+        "chunking_strategy",
+        "answer_mode",
+    }
     if not required.issubset(data) or set(data) - required - optional:
         raise ValueError("Settings have missing or unrecognized fields.")
     schema_version = data["schema_version"]
@@ -58,6 +64,12 @@ def load_settings(settings_path: Path) -> RuntimeSettings:
     strategy = data.get("chunking_strategy", "boundary")
     if not isinstance(strategy, str) or strategy not in ("boundary", "markdown_blocks"):
         raise ValueError("chunking_strategy must be 'boundary' or 'markdown_blocks'.")
+    answer_mode = data.get("answer_mode", "generated")
+    if not isinstance(answer_mode, str) or answer_mode not in (
+        "generated",
+        "verified_excerpts",
+    ):
+        raise ValueError("answer_mode must be 'generated' or 'verified_excerpts'.")
 
     def configured_path(key: str, fields: Mapping[str, object] = data) -> Path:
         value = fields[key]
@@ -148,6 +160,7 @@ def load_settings(settings_path: Path) -> RuntimeSettings:
             storage_dir=storage_dir,
             max_output_tokens=max_output_tokens,
             chunking_strategy=strategy,
+            answer_mode=answer_mode,
         ),
         model_dir=model_dir,
         source_manifest=source_manifest,

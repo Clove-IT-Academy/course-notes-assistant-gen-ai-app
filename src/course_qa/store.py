@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 from collections.abc import Generator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -21,6 +22,7 @@ from course_qa.contracts import (
     require_string,
 )
 from course_qa.embeddings import validate_vectors
+from course_qa.errors import IndexStateError, MissingIndexError
 
 if TYPE_CHECKING:
     from chromadb import Collection
@@ -43,7 +45,8 @@ def _read_object(path: Path) -> dict[str, object]:
 
 def _parse_manifest(data: Mapping[str, object]) -> SnapshotManifest:
     if (
-        data.get("schema_version") != 1
+        type(data.get("schema_version")) is not int
+        or data.get("schema_version") != 1
         or data.get("status") != "ready"
         or data.get("distance_metric") != "cosine"
     ):
@@ -66,6 +69,7 @@ class SnapshotStore:
     def __init__(self, storage_dir: Path) -> None:
         self.root = storage_dir.resolve()
         self._clients: list[_ClosableClient] = []
+        self._lock_held = False
 
     def close(self) -> None:
         """Release clients before unlocking the embedded database."""
@@ -89,6 +93,7 @@ class SnapshotStore:
             ) from None
         try:
             os.write(descriptor, str(os.getpid()).encode("ascii"))
+            self._lock_held = True
             yield
         finally:
             try:
@@ -96,11 +101,16 @@ class SnapshotStore:
             finally:
                 os.close(descriptor)
                 lock_path.unlink(missing_ok=True)
+                self._lock_held = False
 
     def _snapshot_dir(self, index_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f]{32}", index_id):
             raise ValueError("Invalid snapshot identifier.")
         directory = (self.root / "indexes" / index_id).resolve()
+        if (self.root / "indexes").is_symlink() or (
+            self.root / "indexes" / index_id
+        ).is_symlink():
+            raise ValueError("Snapshot directories must not be symlinks.")
         if not directory.is_relative_to(self.root):
             raise ValueError("Snapshot path escapes storage.")
         return directory
@@ -123,13 +133,35 @@ class SnapshotStore:
         pointer = self.root / "active.json"
         if not pointer.exists():
             return None
-        index_id = require_string(_read_object(pointer), "index_id")
-        manifest = _parse_manifest(
-            _read_object(self._snapshot_dir(index_id) / "manifest.json")
-        )
+        if pointer.is_symlink():
+            raise IndexStateError("The active pointer must not be a symlink.")
+        try:
+            index_id = require_string(_read_object(pointer), "index_id")
+            manifest = _parse_manifest(
+                _read_object(self._snapshot_dir(index_id) / "manifest.json")
+            )
+        except (OSError, ValueError, TypeError) as error:
+            raise IndexStateError(
+                f"Active snapshot metadata is invalid: {error}"
+            ) from error
         if manifest["index_id"] != index_id:
             raise ValueError("The active pointer does not match its manifest.")
         return manifest
+
+    def _open_collection(self, directory: Path) -> Collection:
+        from chromadb.errors import ChromaError
+
+        chroma = directory / "chroma"
+        if not chroma.is_dir() or chroma.is_symlink():
+            raise IndexStateError("Snapshot has no safe Chroma directory.")
+        try:
+            return self._client(directory).get_collection(
+                name=self.COLLECTION_NAME, embedding_function=None
+            )
+        except (ChromaError, OSError, RuntimeError, ValueError) as error:
+            raise IndexStateError(
+                "Snapshot database cannot be opened; rebuild or restore it."
+            ) from error
 
     def create_snapshot(
         self,
@@ -167,21 +199,7 @@ class SnapshotStore:
             metadatas: list[Metadata] = []
             for chunk in batch:
                 checked = parse_chunk_metadata(chunk.metadata)
-                metadatas.append(
-                    {
-                        "source_id": checked["source_id"],
-                        "title": checked["title"],
-                        "project": checked["project"],
-                        "document_type": checked["document_type"],
-                        "source_path": checked["source_path"],
-                        "source_hash": checked["source_hash"],
-                        "content_hash": checked["content_hash"],
-                        "line_start": checked["line_start"],
-                        "line_end": checked["line_end"],
-                        "chunk_index": checked["chunk_index"],
-                        "processing_version": checked["processing_version"],
-                    }
-                )
+                metadatas.append(cast("Metadata", dict(checked)))
             collection.add(
                 ids=[chunk.chunk_id for chunk in batch],
                 documents=[chunk.text for chunk in batch],
@@ -190,6 +208,10 @@ class SnapshotStore:
                     list(vector) for vector in vectors[start : start + batch_size]
                 ],
             )
+        self.close()
+        collection = self._client(directory).get_collection(
+            name=self.COLLECTION_NAME, embedding_function=None
+        )
         if collection.count() != len(chunks):
             raise RuntimeError("Stored chunk count is incorrect.")
         probe = collection.query(
@@ -232,27 +254,113 @@ class SnapshotStore:
     ) -> tuple[SnapshotManifest, Collection]:
         manifest = self.read_active_manifest()
         if manifest is None:
-            raise FileNotFoundError("No active index. Ingest notes first.")
+            raise MissingIndexError("No active index. Ingest notes first.")
         if (
             manifest["embedding_fingerprint"] != embedding_fingerprint
             or manifest["dimension"] != dimension
         ):
-            raise ValueError("Embedding configuration changed. Rebuild the index.")
+            raise IndexStateError("Embedding configuration changed. Rebuild the index.")
         directory = self._snapshot_dir(manifest["index_id"])
         if not (directory / "chroma").is_dir():
-            raise FileNotFoundError("The active Chroma directory is missing.")
-        collection = self._client(directory).get_collection(
-            name=self.COLLECTION_NAME,
-            embedding_function=None,
-        )
+            raise IndexStateError("The active Chroma directory is missing.")
+        collection = self._open_collection(directory)
         metadata = collection.metadata or {}
         if (
             metadata.get("embedding_fingerprint") != embedding_fingerprint
             or metadata.get("dimension") != dimension
             or collection.count() != manifest["chunk_count"]
         ):
-            raise ValueError("Stored collection does not match its manifest.")
+            raise IndexStateError("Stored collection does not match its manifest.")
         return manifest, collection
+
+    def list_snapshots(self) -> list[SnapshotManifest]:
+        """List complete app snapshots; never infer ownership of unknown folders."""
+        if not self._lock_held:
+            raise RuntimeError("Snapshot maintenance requires the storage lock.")
+        parent = self.root / "indexes"
+        if parent.is_symlink():
+            raise ValueError("Snapshot directories must not be symlinks.")
+        if not parent.exists():
+            return []
+        snapshots: list[SnapshotManifest] = []
+        for path in sorted(parent.iterdir(), key=lambda item: item.name):
+            if not re.fullmatch(r"[0-9a-f]{32}", path.name):
+                continue
+            directory = self._snapshot_dir(path.name)
+            if not (directory / "manifest.json").is_file():
+                continue
+            if (directory / "chroma").is_symlink():
+                raise ValueError("Snapshot database directories must not be symlinks.")
+            if not (directory / "chroma").is_dir():
+                continue
+            manifest = _parse_manifest(_read_object(directory / "manifest.json"))
+            if manifest["index_id"] != path.name:
+                raise IndexStateError(
+                    "Snapshot identifier does not match its directory."
+                )
+            snapshots.append(manifest)
+        return snapshots
+
+    def rollback(self, index_id: str) -> SnapshotManifest:
+        if not self._lock_held:
+            raise RuntimeError("Snapshot maintenance requires the storage lock.")
+        directory = self._snapshot_dir(index_id)
+        if not (directory / "manifest.json").is_file():
+            raise IndexStateError("Requested snapshot does not exist.")
+        target = _parse_manifest(_read_object(directory / "manifest.json"))
+        try:
+            active = self.read_active_manifest()
+        except IndexStateError:
+            # Explicit rollback can recover a corrupt pointer. Target database
+            # identity/count checks below still run before atomic publication.
+            active = None
+        if target["index_id"] != index_id:
+            raise IndexStateError("Snapshot identifier mismatch.")
+        if active is not None and any(
+            target[key] != active[key]
+            for key in ("embedding_fingerprint", "dimension", "distance_metric")
+        ):
+            raise IndexStateError("Rollback target uses a different embedding space.")
+        chroma = directory / "chroma"
+        if not chroma.is_dir() or chroma.is_symlink():
+            raise IndexStateError("Rollback target has no safe Chroma directory.")
+        collection = self._open_collection(directory)
+        metadata = collection.metadata or {}
+        if (
+            collection.count() != target["chunk_count"]
+            or metadata.get("embedding_fingerprint") != target["embedding_fingerprint"]
+            or metadata.get("dimension") != target["dimension"]
+        ):
+            raise IndexStateError(
+                "Rollback target failed count/compatibility verification."
+            )
+        self.close()
+        self.publish(target)
+        return target
+
+    def cleanup(self, *, keep: int = 2, apply: bool = False) -> list[str]:
+        """Preview by default; retain active and newest `keep` inactive snapshots."""
+        if type(keep) is not int or keep < 0:
+            raise ValueError("keep must be a nonnegative integer.")
+        snapshots = self.list_snapshots()
+        active = self.read_active_manifest()
+        inactive = [
+            m
+            for m in snapshots
+            if active is None or m["index_id"] != active["index_id"]
+        ]
+        inactive.sort(
+            key=lambda m: (
+                (self._snapshot_dir(m["index_id"]) / "manifest.json").stat().st_mtime_ns
+            ),
+            reverse=True,
+        )
+        targets = [m["index_id"] for m in inactive[keep:]]
+        if apply:
+            self.close()
+            for index_id in targets:
+                shutil.rmtree(self._snapshot_dir(index_id))
+        return targets
 
     def query(
         self,
